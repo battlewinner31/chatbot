@@ -74,4 +74,74 @@ def deterministic_summary(t: dict) -> str:
         parts.append("IFR conditions")
     if t.get("vis"): parts.append(f"Visibility {t['vis']}")
     if ceil: parts.append(f"Ceiling {ceil} ft")
-    elif
+    elif t.get("clouds"): parts.append("Clouds " + ", ".join([f"{c} {int(b)*100} ft" for c,b in t["clouds"]]))
+    if t.get("wind"):
+        w=t["wind"]; s=f"Winds {w['dir']}° at {w['spd']} kt"
+        if w.get("gst"): s+=f", gusting {w['gst']} kt"
+        parts.append(s)
+    if t.get("wx"): parts.append("Weather " + ", ".join(t["wx"]))
+    if t.get("temp") and t.get("dew"): parts.append(f"Temp {t['temp']}°C, dew {t['dew']}°C")
+    if t.get("alt"): parts.append(f"Altimeter {t['alt']}")
+    return ". ".join(parts) + "."
+
+# ----------------- Fetch METAR from AWC -----------------
+AWC_BASE = "https://aviationweather.gov/api/data"
+
+def fetch_latest_metar(icao: str) -> str:
+    try:
+        r = requests.get(f"{AWC_BASE}/metar", params={"format":"json","ids":icao}, headers={"User-Agent":"WxBrief/0.1"}, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        arr = data if isinstance(data, list) else data.get("metar", [])
+        if not arr: return ""
+        raw = arr[0].get("rawOb") or arr[0].get("raw_text") or ""
+        return raw
+    except Exception:
+        return ""
+
+# ----------------- Streamlit UI -----------------
+st.set_page_config(page_title="Aviation Weather Brief", page_icon="⛅", layout="centered")
+st.title("Aviation Weather Brief (Route)")
+
+mode = st.radio("Input type", ["Airport ICAOs (Route)", "Raw METARs"])
+if mode == "Airport ICAOs (Route)":
+    icaos = st.text_area("Enter ICAO codes (comma or space separated)", placeholder="KJFK, KLAX, KSFO")
+    if st.button("Fetch & Summarize Route"):
+        codes = re.split(r"[ ,]+", icaos.strip().upper())
+        codes = [c for c in codes if len(c) == 4]
+        if not codes:
+            st.warning("Please enter valid ICAO codes.")
+        else:
+            results = []
+            for icao in codes:
+                raw = fetch_latest_metar(icao)
+                if not raw:
+                    results.append({"station": icao, "error": "No METAR found."})
+                    continue
+                tokens = tokenize_metar(raw)
+                llm = deepseek_brief_from_tokens(tokens)
+                summary = llm or deterministic_summary(tokens)
+                results.append({"station": icao, "raw": raw, "tokens": tokens, "summary": summary})
+            # Display results
+            for r in results:
+                st.subheader(r["station"])
+                if "error" in r:
+                    st.error(r["error"])
+                else:
+                    st.code(r["raw"], language="text")
+                    st.json(r["tokens"])
+                    st.success(r["summary"])
+else:
+    raw_in = st.text_area("Paste raw METARs (one per line)", height=180, placeholder="METAR KJFK 121751Z 18016G24KT 4SM -RA BR BKN015 OVC025 06/04 A2990\nMETAR KLAX ...")
+    if st.button("Summarize pasted METARs"):
+        lines = [l.strip() for l in raw_in.strip().splitlines() if l.strip()]
+        if not lines:
+            st.warning("Paste at least one METAR.")
+        else:
+            for raw in lines:
+                tokens = tokenize_metar(raw)
+                llm = deepseek_brief_from_tokens(tokens)
+                summary = llm or deterministic_summary(tokens)
+                st.code(raw, language="text")
+                st.json(tokens)
+                st.success(summary)
